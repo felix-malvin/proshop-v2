@@ -1,0 +1,10 @@
+# Dependency dan hasil build lokal dibuat ulang di dalam container
+node_modules
+build
+
+# File env lokal tidak boleh masuk image
+.env
+.env.*
+
+# Log
+npm-debug.log*
