@@ -1,0 +1,21 @@
+# Dependency dan hasil build lokal tidak boleh masuk image
+node_modules
+**/node_modules
+
+# Frontend punya image sendiri dengan build context terpisah
+frontend
+
+# File upload lokal bukan bagian dari image
+uploads/*
+
+# Rahasia dan konfigurasi runtime
+.env
+.env.*
+deploy
+
+# Metadata Git, editor, dan dokumentasi
+.git
+.gitignore
+.vscode
+*.md
+http
