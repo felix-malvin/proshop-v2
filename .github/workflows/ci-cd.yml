@@ -30,7 +30,7 @@ jobs:
     # MongoDB pendamping khusus untuk pengujian, hidup hanya selama job berjalan
     services:
       mongo:
-        image: mongo:8.0
+        image: mongo:7.0
         ports:
           - 27017:27017
         options: >-
@@ -51,6 +51,9 @@ jobs:
       PAGINATION_LIMIT: 8
 
     steps:
+      - name: Info runner (versi kernel)
+        run: uname -r
+
       - name: Checkout source code
         uses: actions/checkout@v6
 
