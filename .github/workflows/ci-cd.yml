@@ -1,0 +1,136 @@
+name: CI/CD ProShop
+
+# ---------- Kapan workflow berjalan ----------
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  # Tombol "Run workflow" manual di tab Actions, berguna untuk demo
+  workflow_dispatch:
+
+# Hak akses minimum: workflow hanya perlu membaca isi repo
+permissions:
+  contents: read
+
+# Kalau ada push baru ke branch yang sama, run lama dibatalkan
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ==========================================================
+  # JOB 1: CI BACKEND
+  # ==========================================================
+  backend-ci:
+    name: CI Backend (install + smoke test API)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    # MongoDB pendamping khusus untuk pengujian, hidup hanya selama job berjalan
+    services:
+      mongo:
+        image: mongo:8.0
+        ports:
+          - 27017:27017
+        options: >-
+          --health-cmd "mongosh --quiet --eval 'db.adminCommand({ ping: 1 })'"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+
+    # Environment variable untuk pengujian. Bukan rahasia, hanya nilai dummy.
+    env:
+      NODE_ENV: development
+      PORT: 5000
+      MONGO_URI: mongodb://localhost:27017/proshop
+      JWT_SECRET: ci-only-not-a-real-secret
+      PAYPAL_CLIENT_ID: sb
+      PAYPAL_APP_SECRET: dummy
+      PAYPAL_API_URL: https://api-m.sandbox.paypal.com
+      PAGINATION_LIMIT: 8
+
+    steps:
+      - name: Checkout source code
+        uses: actions/checkout@v6
+
+      - name: Setup Node.js 22
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Install dependency backend
+        run: npm ci
+
+      - name: Isi database dengan data contoh
+        run: node backend/seeder.js
+
+      - name: Jalankan backend di background dan tunggu sampai siap
+        run: |
+          nohup node backend/server.js > server.log 2>&1 &
+          for i in $(seq 1 30); do
+            if curl -sf http://localhost:5000/api/products > /dev/null; then
+              echo "Backend siap setelah $((i * 2)) detik"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "Backend tidak merespons dalam 60 detik"
+          cat server.log
+          exit 1
+
+      - name: "Smoke test: daftar produk"
+        run: |
+          COUNT=$(curl -sf http://localhost:5000/api/products | jq '.products | length')
+          echo "Jumlah produk dari API: $COUNT"
+          test "$COUNT" -eq 6
+
+      - name: "Smoke test: login admin"
+        run: |
+          curl -sf -X POST http://localhost:5000/api/users/auth \
+            -H "Content-Type: application/json" \
+            -d '{"email":"admin@email.com","password":"123456"}' \
+            | tee login.json
+          echo
+          jq -e '.isAdmin == true' login.json
+
+      - name: Tampilkan log backend kalau ada langkah yang gagal
+        if: failure()
+        run: cat server.log || true
+
+  # ==========================================================
+  # JOB 2: CI FRONTEND
+  # ==========================================================
+  frontend-ci:
+    name: CI Frontend (install + build produksi)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    # Semua perintah "run" di job ini dijalankan dari folder frontend
+    defaults:
+      run:
+        working-directory: frontend
+
+    steps:
+      - name: Checkout source code
+        uses: actions/checkout@v6
+
+      - name: Setup Node.js 22
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependency frontend
+        run: npm ci
+
+      - name: Build produksi React (CI=true, warning dianggap error)
+        run: npm run build
+
+      - name: Validasi hasil build
+        run: |
+          test -f build/index.html
+          ls -la build/static/js
