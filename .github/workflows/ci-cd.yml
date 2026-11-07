@@ -13,10 +13,11 @@ on:
 permissions:
   contents: read
 
-# Kalau ada push baru ke branch yang sama, run lama dibatalkan
+# Run pull request yang usang dibatalkan otomatis.
+# Run di main TIDAK dibatalkan, agar proses push image tidak terputus di tengah jalan.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   # ==========================================================
@@ -27,7 +28,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
 
-    # MongoDB pendamping khusus untuk pengujian, hidup hanya selama job berjalan
+    # MongoDB pendamping khusus untuk pengujian, hidup hanya selama job berjalan.
+    # Versi 7.0 dipakai karena MongoDB 8.x crash di kernel Linux 6.19+ (SERVER-121912).
     services:
       mongo:
         image: mongo:7.0
@@ -137,3 +139,79 @@ jobs:
         run: |
           test -f build/index.html
           ls -la build/static/js
+
+  # ==========================================================
+  # JOB 3: CD (build image + push ke Docker Hub)
+  # ==========================================================
+  build-and-push:
+    name: CD ${{ matrix.component }} (build image + push Docker Hub)
+
+    # Gerbang utama: job ini HANYA berjalan kalau kedua job CI lulus
+    needs: [backend-ci, frontend-ci]
+
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    # Satu definisi job, dijalankan dua kali: untuk backend dan frontend
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - component: backend
+            context: .
+            dockerfile: backend/Dockerfile
+          - component: frontend
+            context: frontend
+            dockerfile: frontend/Dockerfile
+
+    steps:
+      - name: Checkout source code
+        uses: actions/checkout@v6
+
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      # Pull request tidak login dan tidak push. Image hanya dibangun untuk memvalidasi Dockerfile.
+      - name: Login ke Docker Hub
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v4
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Tentukan nama dan tag image
+        id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ${{ secrets.DOCKERHUB_USERNAME }}/proshop-${{ matrix.component }}
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=sha,prefix=sha-,format=short
+
+      - name: Build image (dan push kalau bukan pull request)
+        id: build
+        uses: docker/build-push-action@v7
+        with:
+          context: ${{ matrix.context }}
+          file: ${{ matrix.dockerfile }}
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=${{ matrix.component }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.component }}
+
+      - name: Ringkasan hasil deployment
+        run: |
+          {
+            echo "### Image ${{ matrix.component }}"
+            echo ""
+            echo "- Event: \`${{ github.event_name }}\`"
+            echo "- Commit: \`${{ github.sha }}\`"
+            echo "- Push ke Docker Hub: \`${{ github.event_name != 'pull_request' }}\`"
+            echo "- Digest: \`${{ steps.build.outputs.digest }}\`"
+            echo ""
+            echo "Tags:"
+            echo '```'
+            echo "${{ steps.meta.outputs.tags }}"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
